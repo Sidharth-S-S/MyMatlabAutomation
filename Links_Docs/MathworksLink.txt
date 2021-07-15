@@ -1,0 +1,24 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+Beginning with R2020a, you can export your Simulink model as a standalone FMU with Simulink Compiler . When a third-party tool runs the FMU, no MATLAB or Simulink license will be required. 
+Beginning with R2019a, the ability to export a Simulink model to a tool-coupling FMU is available in Simulink:
+https://www.mathworks.com/help/simulink/ug/export-model-as-tool-coupling-fmu.html
+Wrap your Simulink model and project files into an FMU that has a co-simulation interface. When a third-party tool runs the FMU, the FMU checks out the required MathWorks® licenses, starts a local MATLAB® session, and runs the model.
+In R2018b, a MathWorks®-provided support package: "Tool-Coupling Co-Simulation FMU Export for Simulink support package" is required
+While we recommend this to be downloaded through the Add-On Explorer, a link to open it in Add-On Explorer is available on File Exchange:
+https://www.mathworks.com/matlabcentral/fileexchange/68814-tool-coupling-co-simulation-fmu-export-for-simulink
+For R2018a and prior, there are third-party products which may provide this functionality. Please refer to the following links for more information:
+
+    https://www.mathworks.com/products/connections/product_detail/modelon-fmi-toolbox.html
+    https://www.mathworks.com/products/connections/product_detail/iti-fmi-target.html
+    https://www.mathworks.com/products/connections/product_detail/claytex-fmi-blockset.html
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+Found a solution by pure coincidence!
+After the co-simulation is completed, running the following command returns a list of run identifiers:
+runIDs = Simulink.sdi.getAllRunIDs
+last element of this vector refers to your co-simulation. To retrieve the dataset object containing all logged signals in the model, use the following command:
+cosim_id = runIDs(end);
+dataset = Simulink.sdi.exportRun(cosim_id)
+There you have it.
+
+https://in.mathworks.com/help/simulink/ug/export-model-as-tool-coupling-fmu.html
