@@ -22,3 +22,17 @@ dataset = Simulink.sdi.exportRun(cosim_id)
 There you have it.
 
 https://in.mathworks.com/help/simulink/ug/export-model-as-tool-coupling-fmu.html
+https://in.mathworks.com/help/driving/examples.html
+https://in.mathworks.com/help/driving/ug/generate-lane-information-from-recorded-data.html
+https://in.mathworks.com/help/driving/ug/automatic-scenario-generation.html
+
+Import Road Network
+
+You can download a road network from https://www.openstreetmap.org, which provides access to crowd-sourced map data all over the world. The data is licensed under the Open Data Commons Open Database License (ODbL), https://opendatacommons.org/licenses/odbl/.
+
+Specify the bounding box coordinates to import the MCity test facility map from openstreetmap.org by using the helperOSMImport function. The function returns a driving scenario object that contains the road network from the imported map data. You can also use the roadNetwork function to import a road network from OpenDRIVE®, HERE HD Live Map, or OpenStreetMap® files. 
+
+
+
+https://in.mathworks.com/help/driving/ug/test-closed-loop-adas-algorithm-using-driving-scenario.html
+
