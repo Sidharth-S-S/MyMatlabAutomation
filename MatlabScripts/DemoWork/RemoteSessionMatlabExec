@@ -1,0 +1,811 @@
+function returnCode = startRemoteSession(config, test, official, varargin)
+% startRemoteSession - Start the remote session in case of headless/jenkins
+% use case.
+%
+% Description:
+%  This function is called when the VMC Sim is started in headless mode
+%  to open the second Matlab session. It includes the monitoring of programs
+%  by a watchdog functionality and the logging of occurred issues during
+%  simulation.
+%
+% Example:
+%  startRemoteSession('Configs/VMC_at_ADAS.json', ...
+%       'platform_example_tests/TestSeries/Development.ts', true)
+%
+% Mandatory inputs:
+%  config                Configuration file (.json)
+%  test                  CarMaker TestRun or test series
+%  official              Boolean that determines whether simulation can be
+%                        started with dirty repository
+%                        (true = repository must be clean)
+% Output:
+%  returnCode             0 = integration completed successfully
+%                        Warnings:
+%                         1 = Execution of the smoke test not successfull
+%                        Errors:
+%                         -1 = old session not cleaned up
+%                         -2 = unable to find TestRun or test series
+%                         -3 = repository is not okay
+%                         -4 = selected config is not okay
+%                         -5 = Matlab error
+%                         -6 = CarMaker error
+%                         -7 = unable to access logfiles
+%                         -8 = unexpected error
+% Set returnCode if an error/warning got catched for quitting Matlab with a
+% proper return value -> batch script can then detect the error and Jenkins
+% will also be able to mark the Job as failed.
+returnCode = 0;
+jenkinsUser = 'cyc9abt';
+
+[~, projDir_] = strtok(reverse(strrep(pwd, '\', '/')), '/');
+projDir_ = reverse(projDir_);
+
+writeSessionLog_ = true;
+
+% If folder Results/headless already exists, delete it and recreate it
+if ~isfolder('Results/headless')
+    mkdir('Results/headless');
+end
+
+% Create empty \Headless_Execution.txt
+if isempty(varargin)
+    fclose(fopen('Results\headless\Headless_Execution.txt', 'w'));
+end
+
+try
+    % Get the PIDs of Matlab Tasks
+    prevMatlabPids_ = getPid('MATLAB.exe');
+
+    % Get the PIDs of CarMaker GUI Tasks
+    prevCMPids_ = getPid('HIL.exe');
+    if ~isempty(prevCMPids_)
+        % If we support Jenkins, we should make a distinction of cases here and use
+        % the following behavior when running on Jenkins
+        if strcmpi(getenv('USERNAME'), jenkinsUser)
+            for i_=1:numel(prevCMPids_)
+                system(['taskkill -f -pid ', num2str(prevCMPids_(i_)), '>nul 2>&1']);
+            end
+            loggingMessage = 'All open CarMaker sessions have been killed in order to enable a new execution.';
+            createLogFile('warn_msg', loggingMessage);
+        else % Throw an error in case of local execution
+            writeSessionLog_ = false;
+            error('One or more CarMaker sessions are running! Please close them and retry!');
+        end
+    end
+
+    % Get the PIDs of CM Movie Tasks
+    prevMoviePids_ = getPid('Movie.exe');
+
+    % Get the PIDs of CM Movie Tasks
+    prevIPGCtrlPids_ = getPid('ipg-control.exe');
+
+    % Check if TestRun/TestSeries exists and is valid
+    [ok, errorMsg, test] = checkForCMTest(test);
+    if ~ok
+        returnCode = -2;
+        error(errorMsg{:});
+    end
+    [ok, Msg] = checkForCMReferences(test);
+    if ~ok
+        returnCode = -2;
+        error(Msg{:});
+    end
+    temp = strsplit(test, '/Data/TestRun/');
+    test = temp{end};
+
+    % Check VMC sim environment repository including submodules for changes
+    % or untracked files
+    [nok, isRepo] = checkRepository(pwd, 'VMC Simulation Environment', official);
+    if nok
+        returnCode = -3;
+        return;
+    end
+    if isRepo
+        [~,submodulepath]  = system('git submodule foreach --recursive');
+        temp = strrep(submodulepath,'Entering ''../','');
+        submodules =  strsplit(strtrim(temp),'\n');
+        testRepo_ = ['Data/TestRun/', strtok(test, '/')];
+        if any(startsWith(submodules, testRepo_))
+            [nok, ~] = checkRepository([projDir_, testRepo_], 'Test repository', official);
+            if nok
+                returnCode = -3;
+                return;
+            end
+        end
+    else
+        testRepo_ = ['Data/TestRun/', strtok(test, '/')];
+        if isfolder(testRepo_)
+            [nok, ~] = checkRepository([projDir_, testRepo_], 'Test repository', official);
+            if nok
+                returnCode = -3;
+                return;
+            end
+        end
+    end
+
+    if isfolder('../Data/vmc_test_core_files/')
+        [nok, ~] = checkRepository('../Data/vmc_test_core_files/', 'Test Core repository', official);
+        if nok
+            returnCode = -3;
+            return;
+        end
+    end
+
+    fid = fopen('Results\headless\Headless_Execution.txt','a');
+    if fid~=-1
+        fprintf(fid,'########################################################################\n');
+        fprintf(fid,'Input Arguments for Headless Execution are as below\n');
+        if (exist(config, 'file') ==2)
+            fprintf(fid,'VMC Simulation Configuration File: %s\n', config);
+            selectedConfig = readJson(config, 1);
+            if isempty(selectedConfig)
+                returnCode = -4;
+                fprintf(fid, 'Error: Unable to read the selectedConfig from the json file (''%s'')! Simulation is not possible.\n', config);
+                fclose(fid);
+                return;
+            end
+            [isValid, warnCell] = checkSelectedConfig(selectedConfig);
+            if ~isValid
+                returnCode = -4;
+                fprintf(fid,'Error: VMC Simulation Configuration File ''%s'' is not valid. Simulation is not possible.\n', config);
+                fprintf(fid, '%s\n', warnCell{:});
+                fclose(fid);
+                return;
+            end
+        else
+            returnCode = -4;
+            fprintf(fid,'Error: VMC Simulation Configuration File ''%s'' is not available. Simulation is not possible.\n', config);
+            fclose(fid);
+            return;
+        end
+        fprintf(fid,'Name of test series or TestRun: %s\n', test);
+        fprintf(fid,'vmsim.core folder path: %s\n', getCoreDir());
+        fprintf(fid,'#########################################################################\n');
+        fclose(fid);
+    end
+
+    % Check for Parallel Computing Toolbox.
+    toolboxStruct = ver;
+    toolboxes = {toolboxStruct.Name};
+    check_PCT = any(strcmp(toolboxes,'Parallel Computing Toolbox'));
+    if check_PCT
+        try
+            disp('Starting second Matlab instance running the VMCSim');
+            % Open a second Matlab session via PCT for configuring the VMC Sim
+            job = createJob(parcluster());
+
+            createTask(job, @system, 2, ...
+                {(['"', matlabroot '\bin\matlab.exe" -nosplash -nodesktop -noFigureWindows Startup Options -sd ', ...
+                pwd, ' -logfile SimulinkCache\logFile_secondInstance.txt -r "addpathVMCSim; startSimulation(''SelectedConfig'', ''', ...
+                config, ''', ''AutoRun'', false, ''Headless'', true);"'])});
+            lastwarn_ = lastwarn('');
+            warning('off', 'parallel:cluster:DepfunError');
+            submit(job);
+            lastwarn(lastwarn_);
+            warning('on', 'parallel:cluster:DepfunError');
+        catch
+            check_PCT = false;
+        end
+    end
+    % If the PCT is not available just open the Simulation environment via
+    % system command in another window -> in this case it isnot possible to
+    % create a logfile in parallel to simulation
+    if ~check_PCT
+        disp('Starting second Matlab instance running the VMCSim');
+        system(['"', matlabroot '\bin\matlab.exe" -nosplash -nodesktop -noFigureWindows -sd ', ...
+            pwd, ' -logfile SimulinkCache\logFile_secondInstance.txt -r "addpathVMCSim; startSimulation(''SelectedConfig'', ''', ...
+            config, ''', ''AutoRun'', false, ''Headless'', true);"']);
+    end
+
+    % Open a tcp server and wait for the client (the second Matlab
+    % instance) to open. See startSimulation.m
+    try
+        t = tcpip('localhost', 30000, 'NetworkRole', 'server', 'Timeout', 300);
+        fopen(t);
+        % Check if CM licenses are available (after CM is started!)
+        licNo = waitForCMLic(jenkinsUser);
+
+        pause(0.1);
+
+        if isempty(licNo)
+            fwrite(t, uint8('LicenseNotAvailable'));
+        else
+            fwrite(t, uint8('LicenseAvailable'));
+        end
+
+        % Wait for message to be read by startSimlation
+        while (t.BytesAvailable~=0)
+            pause(0.1);
+        end
+
+        % Wait for response from startSimlation
+        while (t.BytesAvailable==0)
+            pause(0.1);
+        end
+        message = char(fread(t, t.BytesAvailable)).'; %#ok<FREAD>
+        fclose(t);
+
+        if strcmp(message, 'CMStarted')
+            disp('CarMaker started!');
+        elseif strcmp(message, 'MatlabWillBeClosed')
+            error('Second Matlab instance will be closed!');
+        end
+
+    catch ME
+        % Log all Matlab errors that happened while execution into the log file
+        returnCode = -5;
+        createLogFile('Exception_', ME);
+        fprintf(2, '%s\n', ME.message);
+        fprintf(2, 'Execution aborted!!!\n');
+    end
+
+    if (returnCode == 0)
+        %%%
+        %%% Setup TCP connection
+        %%%
+
+        % Establish TCP Connection.
+        while ~exist('tcpConnection', 'var')
+            tcpConnection = reEstablishConnection('', getIPAddress(), getCommPort());
+            pause(0.1);
+        end
+
+        % Get new Matlab PID
+        MatlabTaskID = setdiff(getPid('MATLAB.exe'), prevMatlabPids_);
+
+        % Get new CM PID
+        CMTaskID = setdiff(getPid('HIL.exe'), prevCMPids_);
+        if isempty(CMTaskID)
+            returnCode = -6;
+            error('No CarMaker session open. Aborting...');
+        elseif length(CMTaskID)==1 % Only the CM Main GUI is opened
+            % do nothing
+        elseif length(CMTaskID)==2 % CM Main GUI and Instruments GUI are opened
+            CMTaskID_ = CMTaskID;
+            for i_=1:2
+                myInfo = System.Diagnostics.Process.GetProcessById(CMTaskID_(i_));
+                if startsWith(char(myInfo.MainWindowTitle), 'Instruments')
+                    InstTaskID = CMTaskID_(i_);
+                else
+                    CMTaskID = CMTaskID_(i_);
+                end
+            end
+        else
+            returnCode = -6;
+            error('Too many CarMaker sessions opened. Aborting...');
+        end
+
+        % Get new CM Movie PID
+        MovieTaskID = setdiff(getPid('Movie.exe'), prevMoviePids_);
+        if length(MovieTaskID)>1
+            returnCode = -6;
+            error('Too many IPG Movie sessions open. Aborting...');
+        end
+
+        % Get new IPGControl PID
+        IPGCtrlTaskID = setdiff(getPid('ipg-control.exe'), prevIPGCtrlPids_);
+        if length(IPGCtrlTaskID)>2 % IPG Control has two versions
+            returnCode = -6;
+            error('Too many IPG Control sessions open. Aborting...');
+        end
+
+        % Write License number to headless log file
+        fid = fopen('Results\headless\Headless_Execution.txt', 'a');
+        if fid~=-1
+            fprintf(fid,'########################################################################\n');
+            fprintf(fid,'Execution started at %s\n', datetime('now'));
+            fprintf(fid,'User: %s\n', getenv('USERNAME'));
+            fprintf(fid,'Host: %s\n', getenv('COMPUTERNAME'));
+            fprintf(fid,'Location: %s\n', pwd);
+            fprintf(fid,'CarMaker License: %s\n', licNo);
+            fclose(fid);
+        else
+            returnCode = -7;
+            error('Unable to access log file. Aborting ...');
+        end
+
+        % Check whether CM GUI is IDLE.
+        watchdog('SimStatus', 'O-2', 100, MatlabTaskID, CMTaskID);
+        disp('The CarMaker status is idle.');
+
+        % Load the test run/test series.
+        write(tcpConnection, [uint8(['LoadTestRun "', test, '"']) 10]);
+
+        % For Testseries simulation.
+        if endsWith(test, '.ts')
+            fprintf(1, 'The test series %s is loaded.\n', test);
+
+            watchdog('TestMgr get Status', 'Oidle', 10);
+
+            % Trigger the simulation
+            write(tcpConnection, [uint8('TestMgr start -async') 10]);
+
+            % Wait for status running
+            TM_Status = watchdog('TestMgr get Status', 'Orunning', 100);
+            fprintf(1, 'Execution of test series started.\n');
+
+            while (contains((TM_Status),'Orunning'))
+                CM_Status = watchdog('SimStatus', {'O-1', 'O-2', 'O0','O-6','O-7'}, 300);
+                if (contains(strtrim(CM_Status), 'O-2'))
+                    TM_Status = getStatus('TestMgr get Status');
+                    while ~((contains(strtrim(CM_Status), 'O0')) || (contains(strtrim(TM_Status), 'Oidle')))
+                        pause(0.5);
+                        TM_Status = getStatus('TestMgr get Status');
+                        CM_Status = getStatus('SimStatus');
+                    end
+                    if contains(strtrim(TM_Status), 'Oidle')
+                        break;
+                    end
+                elseif (contains(strtrim(CM_Status), 'O-6'))
+                    returnCode = 1;
+                    createLogFile('Err_Msg', 'CarMaker FATAL ERROR / Emergency Mode');
+                    break;
+                elseif (contains(strtrim(CM_Status), 'O-7'))
+                    returnCode = -6;
+                    createLogFile('Err_Msg', 'CarMaker Waiting for License');
+                    break;
+                end
+                disp('####################################');
+                disp('CarMaker is preparing the execution.');
+                if ~(str2double(CM_Status(2:end))>=0)
+                    watchdog('SimStatus', 'O0', 300);
+                end
+                disp('Execution of TestRun started');
+                % Get the name of the active element in Test Manager -> this is
+                % the variation name which also has to be logged
+                active_ele = getStatus('TestMgr get ActiveItem');
+                write(tcpConnection, [uint8(['TestMgr itemget ' strtrim(active_ele(2:end)) ' -name']) 10]);
+                pause(0.5);
+                variation_name = strtrim(char(read(tcpConnection)));
+                var_name = ['variation_name:' variation_name(2:end)];
+                write(tcpConnection, [uint8(['SessionLogMsg ' var_name]) 10]);
+                watchdog('SimStatus', 'O-3', 1800);
+                disp('Execution of TestRun finished');
+                disp('');
+                pause(1);
+                TM_Status = watchdog('TestMgr get Status', {'Orunning', 'Oidle'}, 10);
+            end
+            disp('Execution for the test series is completed');
+            % For test run simulation
+        else
+            fprintf(1, 'TestRun %s is loaded.\n', test);
+            % Trigger test run start
+            write(tcpConnection, [uint8('StartSim') 10]);
+            % Check for license error.
+            CM_Status = watchdog('SimStatus', {'O0','O-3','O-6','O-7'}, 300);
+            if (contains(strtrim(CM_Status), 'O-6'))
+                returnCode = 1;
+                disp('CarMaker FATAL ERROR / Emergency Mode');
+                createLogFile('Err_Msg', 'CarMaker FATAL ERROR / Emergency Mode');
+            elseif (contains(strtrim(CM_Status), 'O-7'))
+                returnCode = -6;
+                disp('CarMaker Waiting for License');
+                createLogFile('Err_Msg', 'CarMaker Waiting for License');
+            elseif (contains(strtrim(CM_Status), 'O-3'))
+                returnCode = 1;
+                disp('No simulation was executed!');
+                createLogFile('Err_Msg', 'No simulation was executed!');
+                watchdog('SimStatus', 'O-2', 1800);
+            else
+                disp('Execution of TestRun started');
+                watchdog('SimStatus', 'O-2', 1800);
+                disp('Execution of TestRun is completed!');
+            end
+        end
+    end
+
+catch ME
+    % Log all Matlab errors that happened while execution into the log file
+    createLogFile('Exception_', ME);
+    fprintf(2, '%s\n', ME.message);
+    fprintf(2, 'Execution aborted!!!!\n');
+    if (returnCode>=0)
+        returnCode = -8;
+    end
+end
+
+% Close the TCP connection
+clear tcpConnection;
+echotcpip("off");
+
+try
+    % Get the log information from Diagnostics.txt and Session Log from
+    % CarMaker
+    if writeSessionLog_
+        readSessionLog();
+        readDiagnosticLog();
+    end
+catch ME
+    createLogFile('Exception_', ME);
+    fprintf(1, 'Unable to create log!\n');
+    disp(getReport(ME, 'extended', 'hyperlinks', 'on'));
+    returnCode = -7;
+end
+
+% Post processing for the integration use case.
+calledFuncs = dbstack;
+integration = any(arrayfun(@(x) ...
+    (strcmp(calledFuncs(x).name, 'startHeadlessIntegration')), 1:length(calledFuncs)));
+if integration
+    postprocessHeadless(selectedConfig);
+end
+
+fprintf('Cleaning up ... ');
+
+% Terminate the Matlab session
+allPIDs = getPid('MATLAB.exe');
+
+if exist('MatlabTaskID', 'var') && any(allPIDs==MatlabTaskID)
+    system(['taskkill -f -pid ', num2str(MatlabTaskID), '>nul 2>&1']);
+end
+
+% If exists, terminate the IPG Movie session
+allPIDs = getPid('Movie.exe');
+if exist('MovieTaskID', 'var') && any(allPIDs==MovieTaskID)
+    system(['taskkill -f -pid ', num2str(MovieTaskID), '>nul 2>&1']);
+end
+
+% Terminate the CarMaker & Instruments session
+allPIDs = getPid('HIL.exe');
+if exist('CMTaskID', 'var') && any(allPIDs==CMTaskID)
+    system(['taskkill -f -pid ', num2str(CMTaskID), ' >nul 2>&1']);
+end
+if exist('InstTaskID', 'var') && any(allPIDs==InstTaskID)
+    system(['taskkill -f -pid ', num2str(InstTaskID), ' >nul 2>&1']);
+end
+
+% If exists, terminate the IPG Control session
+allPIDs = getPid('ipg-control.exe');
+if exist('IPGCtrlTaskID', 'var') && any(allPIDs==IPGCtrlTaskID)
+    for i_=1:numel(IPGCtrlTaskID)
+        system(['taskkill -f -pid ', num2str(IPGCtrlTaskID(i_)), ' >nul 2>&1']);
+        pause(1);
+    end
+end
+
+pause(10);
+
+fprintf('done!\n');
+
+% Postprocess the job by logging error and warnings detected during job
+% execution in the log file
+if exist('job', 'var')
+    job.delete;
+end
+fid = fopen('SimulinkCache\logFile_secondInstance.txt');
+if fid~=-1
+    text = fscanf(fid,'%c');
+    fclose(fid);
+else
+    text = 'Unable to access the SimulinkCache\logFile_secondInstance.txt file.';
+end
+fid1 = fopen('Results\headless\Headless_Execution.txt','a');
+
+% Write the whole content of the file into the Headless_Execution.txt
+if fid1~=-1
+    fprintf(fid1,'#######################################################################\n');
+    fprintf(fid1,'Details of Second Matlab Instance\n');
+    fprintf(fid1, '%s\n',text);
+    fprintf(fid1,'#######################################################################\n');
+    fclose(fid1);
+else
+    returnCode = -7;
+    createLogFile('Err_Msg','Unable to read Results\headless\Headless_Execution.txt');
+end
+
+disp('Task finished!');
+
+end
+
+
+function [nok, isRepo] = checkRepository(path, RepoType, official)
+% checkRepository - Checks the repository status and logs it
+%
+% Inputs:
+%  path         Path to the (assumed) repository to be checked
+%  RepoType     Descriptive repository name to be used inside the log
+%  official     Boolean that determines whether simulation can be
+%               started with dirty repository
+%               (true = repository must be clean)
+%
+% Outputs:
+%  nok          "true", if the repository is not okay (= in official mode,
+%               but not clean)
+%  isRepo       "true", if "path" points to a git repository
+%
+% Examplary function call
+%  [nok, isRepo] = checkRepository(pwd, 'VMC Simulation Environment', official);
+
+% Init
+nok = false;
+isRepo = false;
+
+% Change to (assumed) repository directory
+curDir = pwd;
+cd(path);
+
+% Check if it really is a repository
+[err,~] = system('git fetch');
+if ~err
+    isRepo = true;
+    % Get git status
+    [~, name]          = system('git config --get remote.origin.url');
+    [~,commitID]       = system('git rev-parse HEAD');
+    [~,changedFiles]   = system('git diff --name-only --ignore-submodules');
+    [~,untrackedFiles] = system('git ls-files --others --exclude-standard');
+    cd(curDir);
+else
+    cd(curDir);
+    return;
+end
+
+% Check if conditions for official run are fullfilled
+if official && (~isempty(changedFiles) || ~isempty(untrackedFiles))
+    nok = true;
+    tmp = strsplit(name, '/');
+    name = tmp{end}(1:end-5);
+    fprintf(1, 'The git repository %s is not clean. Aborting!!!\n', name);
+    createLogFile('Err_Msg', ['Git status of repository ', name, ' is not clean. Please reset the changes or push']);
+    return;
+end
+
+% Log repository information
+fid = fopen('Results\headless\Headless_Execution.txt','a');
+if fid~=-1
+    fprintf(fid,'########################################################################\n');
+    fprintf(fid,'%s: %s\n', RepoType, strtrim(name));
+    fprintf(fid,'Commit ID: %s\n',strtrim(num2str(commitID)));
+    if ~isempty(changedFiles)
+        fprintf(fid,'Changed files:\n%s\n', changedFiles);
+    end
+    if ~isempty(untrackedFiles)
+        fprintf(fid,'Untracked files:\n%s\n', untrackedFiles);
+    end
+    fclose(fid);
+end
+
+end
+
+function status = getStatus(message, tcpConnection)
+% getStatus - Get status from CarMaker
+%
+% Inputs:
+%  message           String that has to be sent. If empty, no sending will
+%                    be tried.
+%  tcpConnection     Handle of tcp connection (has to be given once;
+%                    usually done by calling reEstablishConnection)
+%
+% Outputs:
+%  status            Return message from TCP
+%
+% Examplary function call
+%  status = getStatus('SimStatus');
+%  status = getStatus('SimStatus', tcpConnection);
+%
+% See also:
+%  reEstablishConnection
+
+persistent myConnection
+
+if nargin==2 && ~isempty(tcpConnection)
+    myConnection = tcpConnection;
+end
+
+if ~isempty(message)
+    % Get the status defined in message
+    write(myConnection, [uint8(message) 10] );
+    pause(0.5);
+
+    status = char(read(myConnection));
+    pause(0.5);
+else
+    status = [];
+end
+
+end
+
+function [tcpConnection, status] = reEstablishConnection(message, IP_Addr, port)
+% reEstablishConnection - (Re)-Establish TCP Connection
+%
+% Inputs:
+%  message           String that has to be sent. If empty, no sending will
+%                    be tried.
+%  IP_Addr           String defining IPv4 address with submask (to be
+%                    defined once)
+%  port              Port which is used by CM (see .CarMaker.tcl) (to be
+%                    defined once)
+%
+% Outputs:
+%  status            Return message from TCP
+%
+% Examplary function call
+%  [myConnection, status] = reEstablishConnection('SimStatus', '4.4.4.4', 16660);
+%  [myConnection, status] = reEstablishConnection('SimStatus');
+%
+% See also:
+%  getStatus
+
+persistent myIP_Addr myPort
+
+if nargin==3 && ~isempty(IP_Addr) && ~isempty(port)
+    myIP_Addr = IP_Addr;
+    myPort    = port;
+end
+
+tcpConnection = tcpclient(myIP_Addr, myPort, 'Timeout', 36000);
+pause(2);
+
+% Call getStatus and initialize persistent variable
+status = getStatus(message, tcpConnection);
+
+end
+
+function cm_status = watchdog(cm_command, cm_tarState, timeout, pid_matlab, pid_cm)
+% watchdog - Function that checks if Matlab and CarMaker are still alive.
+%
+% Description:
+%  This function is called while headless execution. The watchdog checks if
+%  the Matlab instance with the VMC Sim and CarMaker are still alive.
+%  If the programs are not reacting anymore the function will throw an error.
+%
+% Example:
+%  watchdog('SimStatus', 'O-2', 10, 15478, 7651); % First call
+%  watchdog('SimStatus', 'O-2', 10); % Second and later calls
+%
+% Mandatory inputs:
+%  cm_command        Tcl command which will be send to CM via TCP/IP
+%  cm_tarState       Expected response from CM
+%  timeout           Individual timeout for watchdog functionality
+%  pid_matlab        PID of Matlab instance running the VMC Sim
+%  pid_cm            PID of CarMaker
+%
+% See also:
+%  startRemoteSession, createLogFile
+
+persistent myMatlabPID myCMPID
+
+if nargin==4
+    myMatlabPID = pid_matlab;
+elseif nargin==5
+    myMatlabPID = pid_matlab;
+    myCMPID = pid_cm;
+end
+
+t=0;
+response = false;
+
+% For the defined timeout it has to be checked if Matlab and CarMaker
+% are still alive and responding. Also it is checked if the next required
+% CarMaker state is reached.
+while t<timeout
+
+    allPIDs = getPid('MATLAB.exe');
+    if ~any(allPIDs==myMatlabPID)
+        error('Matlab was terminated! Aborting ...');
+    end
+
+    allPIDs = getPid('HIL.exe');
+    if ~any(allPIDs==myCMPID)
+        error('CarMaker was terminated! Aborting ...');
+    end
+
+    mInfoML   = System.Diagnostics.Process.GetProcessById(myMatlabPID);
+    mInfoCM   = System.Diagnostics.Process.GetProcessById(myCMPID);
+
+    cm_status = getStatus(cm_command);
+    if strcmp(cm_status,'')
+        [~, cm_status] = reEstablishConnection(cm_command);
+    end
+
+    if mInfoML.Responding && mInfoCM.Responding && any(strcmp(strtrim(cm_status), cm_tarState))
+        response = true;
+        break;
+    end
+
+    pause(1);
+    t=t+1;
+end
+
+if ~response
+    error('Processes are not responding!');
+end
+
+end
+
+function postprocessHeadless(selectedConfig)
+% postprocessHeadless - Function to log the errors during the Headless
+%                       integration
+%
+% Inputs:
+%  selectedconfig    Configuration in Matlab struct format.
+%
+% Examplary function call:
+%  postprocessHeadless(selectedconfig)
+%
+
+fid1 = fopen('Results/headless/Headless_Integration.txt', 'a');
+
+if fid1==-1
+    return;
+end
+
+fid3 = fopen('Results/headless/PR_Description.txt','a');
+if fid3==-1
+    return;
+end
+
+useless_instances = {'Vehicle', 'VMC', 'VMCSim'};
+
+% Don't hardcode the vehicle components.
+resultFolder_ = 'Results\Measurements\';
+fn = fieldnames(selectedConfig);
+for ii = 1:numel(fn)
+    if ~any(strcmp(fn{ii},useless_instances)) && ...
+            ~ismember(fn{ii},selectedConfig.Vehicle.infofile.references)
+        resdir_ = [pwd '\' resultFolder_ fn{ii}];
+
+        % Check for internal measurements
+        if selectedConfig.(fn{ii}).infofile.measurements.internal.active
+            if exist([resdir_ '\' fn{ii},'_runnable.D97'],'file')~=2
+                fprintf(fid1,'WARNING: Internal Measurements are not generated for %s.\n',fn{ii});
+                fprintf(fid3,'WARNING: Internal Measurements are not generated for %s.\\n',fn{ii}); %PR description
+            else
+                fprintf(fid1,'Internal Measurements are generated for %s.\n',fn{ii});
+            end
+        end
+
+        % Check for mat files.
+        if isfield(selectedConfig.(fn{ii}).infofile.measurements,'inputs') ...
+                || isfield(selectedConfig.(fn{ii}).infofile.measurements,'outputs')
+            if exist([resdir_ '\' fn{ii},'_simulink.mat'],'file')~=2
+                fprintf(fid1,'WARNING: Measurements are not generated for %s.\n',fn{ii});
+                fprintf(fid3,'WARNING: Measurements are not generated for %s.\\n',fn{ii}); %PR description
+            else
+                fprintf(fid1,'Measurements are generated for %s.\n',fn{ii});
+            end
+        end
+    end
+end
+
+% Read Diagnostic file and get the warning and error messages.
+fid2 = fopen('SimulinkCache\Diagnostics.txt');
+if fid2~=-1
+    text = textscan(fid2, '%s', 'delimiter', '\n');
+    fclose(fid2);
+else
+    text = 'Unable to access the Diagnostics.txt file.';
+    fprintf(fid1,[text newline]);
+    fprintf(fid3,[text '\\n']);  %PR description
+    fclose(fid1);
+    fclose(fid3);
+    if ~usejava('desktop')
+        quit(5);
+    else
+        return;
+    end
+end
+
+errorflag = 0;
+% Log the error and warnings which will be used for PR description.
+fprintf(fid3,'Result of TestRun simulation:\\n');
+for ii = 1:length(text{1})
+    if startsWith(text{1}{ii},'Error:') || startsWith(text{1}{ii},'Warning:')
+        fprintf(fid3, [text{1}{ii} '\\n']); %PR description
+        errorflag = 1;
+    end
+end
+
+if errorflag == 0
+    fprintf(fid3,'There are no errors or warnings during the TestRun simulation!\\n');
+else
+    fprintf(fid3,'\\n');
+    fprintf(fid3,'#####################################################\\n');
+    fprintf(fid3,'THE SIMULATION WITH THE NEWLY INTEGRATED OMCL FAILED!\\n');
+    fprintf(fid3,'#####################################################\\n');
+end
+
+% close the file identifiers
+fclose(fid1);
+fclose(fid3);
+
+end
