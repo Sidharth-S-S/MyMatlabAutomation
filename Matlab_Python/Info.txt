@@ -1,0 +1,65 @@
+%%%%%%%%%%%%%%%%%%%%%   Environment   %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+pyenv	                Change default environment of Python interpreter
+PythonEnvironment	    Python environment information
+
+%%%%%%%%%%%%%%%%%%%%%   Run Python Code   %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+pyrun	            Run Python statements from MATLAB
+pyrunfile	        Run Python script file from MATLAB
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+mllist = pyrun("days = ['Monday','Tuesday','Wednesday','Thursday','Friday']","days")
+pyrun("a = b*c", b = 5, c = 10)
+md = pyrun("d = a+c", "d")
+
+%%%%%%%%%%%%%%%%%%%%
+localModule.py.
+%%%%%%%%%%%%%%%%%%%%
+def myFunc():
+    print('myFunc executed')
+mvar = 3
+
+pyrun("import localModule")
+out = pyrun("m = localModule.mvar","m")
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+pyrunfile(file)
+pyrunfile(file input)
+outvars = pyrunfile(file,outputs)
+outvars = pyrunfile(file,outputs,pyName=pyValue)
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+hello.py =>
+greeting = "hello"
+print(greeting)
+
+In Matlab => pyrunfile("hello.py")
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+import sys
+greeting = sys.argv[1]
+print(greeting)
+
+pyrunfile("greeting.py 'hello world'")
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+makeList.py  ( Return Python Variable to MATLAB )
+
+l = ['A', 'new', 'list']
+data = pyrunfile("makeList.py", "l")  => O/p :
+data = 
+  Python list with no properties.
+
+    ['A', 'new', 'list']
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+Pass MATLAB Arguments to Python Script   Python script addac.py => The script takes input arguments x and y and returns variable z.
+def add(a,c):
+    b = a+c
+    return b
+
+z = add(x,y)
+
+res = pyrunfile("addac.py","z",x=3,y=2)
+
+%%%%%%%%%%%%%%%%%%%%%  Keyword Arguments
+pyargs	          Create keyword arguments for Python function
+
+%%%%%%%%%%%%%%%%%%%%%  Exception Handling
+matlab.exception.PyException	          Capture error information for Python exception
